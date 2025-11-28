@@ -88,10 +88,7 @@ impl<T: IntoBuffer + 'static> Render for Shader<T> {
                     _ = window.paint_image(bounds, Default::default(), image, 0, false);
                 },
             )
-            .border_1()
-            .border_color(gpui::red())
-            .size_64()
-            .debug()
+            .size_full()
             .into_any()
         } else {
             div().into_any()

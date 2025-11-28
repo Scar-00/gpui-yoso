@@ -260,7 +260,6 @@ pub fn create_render_pass<T: IntoBuffer>(
         layout: &bind_group_layout,
         entries: &[BindGroupEntry {
             binding: 0,
-            //resource: cx.out_buffer.as_entire_binding(),
             resource: buffer.as_entire_binding(),
         }],
     });
@@ -342,7 +341,7 @@ pub fn render_image<T: IntoBuffer>(
         let mut render_pass = encoder.begin_render_pass(&compute_pass_descriptor);
         render_pass.set_pipeline(&render.pipeline);
         render_pass.set_bind_group(0, &render.bind_group, &[]);
-        render_pass.draw(0..3, 0..1);
+        render_pass.draw(0..6, 0..1);
     }
 
     encoder.copy_texture_to_buffer(
