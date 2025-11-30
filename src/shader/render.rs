@@ -1,9 +1,9 @@
 use image::{ImageBuffer, Rgba};
 use shaderc::ShaderKind;
-use std::{error::Error, marker::PhantomData, path::PathBuf, usize};
+use std::{error::Error, fs, marker::PhantomData, path::PathBuf, usize};
 use wgpu::*;
 
-use crate::shader::init::ShaderContext;
+use crate::{prelude::ShaderOptions, shader::init::ShaderContext};
 
 pub enum ShaderSrc {
     WgslStatic {
@@ -42,7 +42,7 @@ impl ShaderSrc {
                 src,
                 vs_entry,
                 fs_entry,
-            } => create_wgsl_shader(cx, &std::fs::read_to_string(src)?, vs_entry, fs_entry),
+            } => create_wgsl_shader(cx, &fs::read_to_string(src)?, vs_entry, fs_entry),
             Self::GlslStatic {
                 vs_src,
                 fs_src,
@@ -66,21 +66,23 @@ impl ShaderSrc {
 }
 
 pub struct RenderContext<T: IntoBuffer> {
-    pipeline: RenderPipeline,
-    src_texture: Texture,
-    bind_group: BindGroup,
-    uniform_buffer: Buffer,
-    out_buffer: Buffer,
+    pub(crate) options: ShaderOptions<T>,
+    pub(crate) pipeline: RenderPipeline,
+    pub(crate) src_texture: Texture,
+    pub(crate) bind_group: BindGroup,
+    pub(crate) uniform_buffer: Buffer,
+    pub(crate) out_buffer: Buffer,
     _data: PhantomData<T>,
 }
 
 impl<T: IntoBuffer> RenderContext<T> {
-    pub fn new(cx: &mut ShaderContext, src: ShaderSrc) -> Result<Self, Box<dyn Error>> {
-        let src_texture_descriptor = TextureDescriptor {
+    pub fn new(cx: &mut ShaderContext, options: ShaderOptions<T>) -> Result<Self, Box<dyn Error>> {
+        let ShaderOptions { src, size, ..  } = &options;
+        let src_texture = cx.device.create_texture(&TextureDescriptor {
             label: None,
             size: Extent3d {
-                width: 512,
-                height: 512,
+                width: size[0],
+                height: size[1],
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -89,21 +91,20 @@ impl<T: IntoBuffer> RenderContext<T> {
             format: TextureFormat::Rgba8UnormSrgb,
             usage: TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
-        };
-        let src_texture = cx.device.create_texture(&src_texture_descriptor);
+        });
 
-        let out_buffer_descriptor = BufferDescriptor {
+        let out_buffer = cx.device.create_buffer(&BufferDescriptor {
             label: None,
-            size: 512 * 512 * 4,
+            size: size[0] as u64 * size[1] as u64 * 4,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
-        };
-        let out_buffer = cx.device.create_buffer(&out_buffer_descriptor);
+        });
 
         let shader = src.create_shader(cx)?;
         let (pipeline, uniform_buffer, bind_group) =
             create_render_pass::<T>(cx, &shader, &src_texture)?;
         Ok(Self {
+            options,
             pipeline,
             uniform_buffer,
             bind_group,
@@ -113,12 +114,21 @@ impl<T: IntoBuffer> RenderContext<T> {
         })
     }
 
+    pub fn resize(&self, cx: &ShaderContext) {
+        todo!()
+    }
+
     pub fn render_image(
         &self,
         cx: &ShaderContext,
         user_data: &T,
     ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>, Box<dyn Error>> {
-        render_image(cx, self, user_data)
+        use std::time::Instant;
+        let start = Instant::now();
+        let res = render_image(cx, self, user_data);
+        let time = Instant::now() - start;
+        tracing::info!("render-ms: {}", time.as_millis());
+        res
     }
 }
 
@@ -285,7 +295,7 @@ pub fn create_render_pass<T: IntoBuffer>(
             compilation_options: PipelineCompilationOptions::default(),
             targets: &[Some(ColorTargetState {
                 format: src_texture.format(),
-                blend: Some(BlendState::REPLACE),
+                blend: Some(BlendState::ALPHA_BLENDING),
                 write_mask: ColorWrites::ALL,
             })],
         }),
@@ -316,7 +326,9 @@ pub fn render_image<T: IntoBuffer>(
         .device
         .create_command_encoder(&CommandEncoderDescriptor { label: None });
 
-    let compute_pass_descriptor = RenderPassDescriptor {
+    let clear_color = render.options.clear_color.to_rgb();
+
+    let render_pass_descriptor = RenderPassDescriptor {
         label: Some("renderpass-descriptor"),
         timestamp_writes: None,
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -325,10 +337,10 @@ pub fn render_image<T: IntoBuffer>(
             resolve_target: None,
             ops: Operations {
                 load: LoadOp::Clear(Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
+                    r: clear_color.r.into(),
+                    g: clear_color.g.into(),
+                    b: clear_color.b.into(),
+                    a: clear_color.a.into(),
                 }),
                 store: StoreOp::Store,
             },
@@ -338,7 +350,7 @@ pub fn render_image<T: IntoBuffer>(
     };
 
     {
-        let mut render_pass = encoder.begin_render_pass(&compute_pass_descriptor);
+        let mut render_pass = encoder.begin_render_pass(&render_pass_descriptor);
         render_pass.set_pipeline(&render.pipeline);
         render_pass.set_bind_group(0, &render.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
@@ -355,8 +367,8 @@ pub fn render_image<T: IntoBuffer>(
             buffer: &render.out_buffer,
             layout: TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * 512),
-                rows_per_image: Some(512),
+                bytes_per_row: Some(4 * render.options.size[0]),
+                rows_per_image: Some(render.options.size[1]),
             },
         },
         render.src_texture.size(),
@@ -374,7 +386,7 @@ pub fn render_image<T: IntoBuffer>(
         cx.device.poll(PollType::wait())?;
         let data = render.out_buffer.get_mapped_range(..);
         use image::{ImageBuffer, Rgba};
-        ImageBuffer::<Rgba<u8>, _>::from_raw(512, 512, data.to_vec())
+        ImageBuffer::<Rgba<u8>, _>::from_raw(render.options.size[0], render.options.size[1], data.to_vec())
             .expect("failed to create image")
     };
     render.out_buffer.unmap();

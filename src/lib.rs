@@ -31,6 +31,7 @@ pub mod prelude {
         self,
         element::{Shader, ShaderOptions},
         ShaderSrc,
+        IntoBuffer,
     };
     pub use crate::spinner::*;
     pub use crate::theme::{self, AppTheme, Theme};
